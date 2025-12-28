@@ -23,6 +23,7 @@ simple = { limit = 5, period = 60 }
 # Frontend files should be placed in ./public directory before deployment
 [assets]
 directory = "./public"
+exclude = ["**/*.map"]
 ignore = [
 "**/*.js.map",
 "**/*.css.map",
