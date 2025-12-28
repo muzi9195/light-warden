@@ -37,17 +37,7 @@ jobs:
                   echo "Using Rust toolchain: $TOOLCHAIN"
                   echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
                   rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
-            # - name: Cache Cargo registry and build artifacts
-            #   uses: actions/cache@v3
-            #   with:
-            #       path: |
-            #           target
-            #           ~/.cargo/bin
-            #           ~/.cargo/registry
-            #           ~/.cargo/git
-            #       key: cargo-build-cache-${{ github.run_id }}
-            #       restore-keys: |
-            #           cargo-build-cache-
+
             - name: Install lld
               run: sudo apt install -y lld clang gcc llvm
 
@@ -80,29 +70,67 @@ jobs:
                     rmdir public/web-vault
                   fi
                   
-                  # Cleanup
-                  rm -f bw_web_${LATEST_TAG}.tar.gz
+                  # Cleanup - remove source map files to avoid size limits
+                  echo "🧹 Removing source map files to avoid Cloudflare size limits..."
+                  find public/ -name "*.js.map" -delete
+                  find public/ -name "*.css.map" -delete
                   
-                  echo "✅ Frontend files extracted to ./public"
+                  # Also remove large unnecessary files
+                  find public/ -name "*.gz" -delete
+                  find public/ -name "*.br" -delete
+                  
+                  echo "✅ Frontend files extracted and cleaned up"
                   ls -la public/ | head -20
 
             - name: Replace D1_DATABASE_ID in wrangler.toml
               run: sed -i "s/\${D1_DATABASE_ID}/${{ secrets.D1_DATABASE_ID }}/g" wrangler.toml
+
+            - name: Clean existing R2 bindings from wrangler.toml
+              run: |
+                  echo "🧹 Cleaning existing R2 bindings from wrangler.toml..."
+                  # Remove any existing [[r2_buckets]] sections and their contents
+                  sed -i '/^\[\[r2_buckets\]\]/,/^\[\[/d' wrangler.toml || true
+                  # Also remove any lines containing ATTACHMENTS_BUCKET binding
+                  sed -i '/binding\s*=\s*"ATTACHMENTS_BUCKET"/d' wrangler.toml || true
+                  echo "✅ Cleaned existing R2 bindings"
 
             - name: Enable R2 binding when R2_NAME is provided
               env:
                   R2_NAME: ${{ secrets.R2_NAME }}
               run: |
                   if [ -n "$R2_NAME" ]; then
-                    echo "🔧 Enabling R2 bucket binding"
+                    echo "🔧 Enabling R2 bucket binding with unique name"
                     {
                       echo ''
+                      echo '# R2 Bucket binding for attachments'
                       echo '[[r2_buckets]]'
-                      echo 'binding = "ATTACHMENTS_BUCKET"'
+                      echo 'binding = "ATTACHMENTS_BUCKET_PROD"'  # Use unique name
                       echo "bucket_name = \"${R2_NAME}\""
                     } >> wrangler.toml
+                    echo "✅ Added R2 binding with unique name: ATTACHMENTS_BUCKET_PROD"
                   else
                     echo "⏭️ R2_NAME not set, skipping R2 binding"
+                  fi
+
+            # Add this step to configure assets to ignore large files
+            - name: Configure wrangler.toml for assets
+              run: |
+                  echo "⚙️ Configuring wrangler.toml for asset handling..."
+                  
+                  # Add assets configuration if not exists
+                  if ! grep -q "\[assets\]" wrangler.toml; then
+                    echo '' >> wrangler.toml
+                    echo '[assets]' >> wrangler.toml
+                    echo 'directory = "./public"' >> wrangler.toml
+                    echo 'ignore = ["**/*.js.map", "**/*.css.map", "**/*.gz", "**/*.br", "**/large-files/**"]' >> wrangler.toml
+                    echo "✅ Added assets configuration to wrangler.toml"
+                  else
+                    echo "✅ Assets configuration already exists in wrangler.toml"
+                  fi
+                  
+                  # Also ensure compatibility flags are set
+                  if ! grep -q "compatibility_flags" wrangler.toml; then
+                    echo 'compatibility_flags = ["nodejs_compat"]' >> wrangler.toml
                   fi
 
             - name: Apply D1 database migrations
