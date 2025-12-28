@@ -23,6 +23,14 @@ simple = { limit = 5, period = 60 }
 # Frontend files should be placed in ./public directory before deployment
 [assets]
 directory = "./public"
+ignore = [
+"**/*.js.map",
+"**/*.css.map",
+"**/*.ts.map",
+"**/large-files/**",
+"**/*.zip",
+"**/*.gz"
+]
 not_found_handling = "404-page"
 html_handling = "auto-trailing-slash"
 # Only invoke Worker for API and Identity routes, serve static files directly for other routes
