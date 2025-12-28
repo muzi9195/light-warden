@@ -23,19 +23,15 @@ simple = { limit = 5, period = 60 }
 # Frontend files should be placed in ./public directory before deployment
 [assets]
 directory = "./public"
-exclude = ["**/*.map"]
-ignore = [
-"**/*.js.map",
-"**/*.css.map",
-"**/*.ts.map",
-"**/large-files/**",
-"**/*.zip",
-"**/*.gz"
-]
 not_found_handling = "404-page"
 html_handling = "auto-trailing-slash"
 # Only invoke Worker for API and Identity routes, serve static files directly for other routes
 run_worker_first = ["/api/*", "/identity/*"]
+
+# 排序非必要文件
+[[assets.rules]]
+type = "ignore"
+pattern = "**/*.map"
 
 [vars]
 # Optional: Set the batch size for imports. Defaults to 30 if not set.
