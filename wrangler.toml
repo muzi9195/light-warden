@@ -69,9 +69,9 @@ migrations_dir = "migrations"
 
 # R2 bucket for file attachments (optional)
 # Uncomment and configure this section to enable file attachments
-# [[r2_buckets]]
-# binding = "ATTACHMENTS_BUCKET"
-# bucket_name = "warden-attachments"
+[[r2_buckets]]
+binding = "ATTACHMENTS_BUCKET"
+bucket_name = "warden-attachments"
 
 [env.dev]
 name = "warden-worker-dev"
