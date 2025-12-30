@@ -1,0 +1,14 @@
+- name: Test WebDAV with curl
+  env:
+    WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+    WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+    WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+  run: |
+    echo "🔍 Testing WebDAV access with curl..."
+    # PROPFIND request to check if auth works
+    curl -u "$WEBDAV_USER:$WEBDAV_PASS" \
+         -X PROPFIND \
+         -H "Content-Type: application/xml" \
+         -d '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/></d:prop></d:propfind>' \
+         "$WEBDAV_URL" \
+         -v
