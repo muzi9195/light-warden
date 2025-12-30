@@ -91,7 +91,7 @@ jobs:
           url = $WEBDAV_URL
           vendor = other
           user = $WEBDAV_USER
-          pass = $WEBDAV_PASS
+          pass_plain = $WEBDAV_PASS
           EOF
           chmod 600 $HOME/.config/rclone/rclone.conf
 
