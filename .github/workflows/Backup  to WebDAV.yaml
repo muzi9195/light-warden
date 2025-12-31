@@ -17,46 +17,58 @@ on:
 
 jobs:
     backup:
-        name: Backup ${{ matrix.env_name }} D1 Database
+        name: Backup Database
         runs-on: ubuntu-latest
-        # 核心逻辑：使用矩阵策略区分环境，避免重复代码
-        strategy:
-            matrix:
-                include:
-                    - env_name: production
-                      db_id_secret: D1_DATABASE_ID
-                      webdav_url_secret: WEBDAV_URL
-                      # 只有定时任务且是production，或者手动选择了production时才运行
-                      run_condition: ${{ (github.event_name == 'schedule') || (github.event_name == 'workflow_dispatch' && inputs.environment == 'production') }}
-                    
-                    - env_name: dev
-                      db_id_secret: D1_DATABASE_ID_DEV
-                      webdav_url_secret: WEBDAV_URL_DEV
-                      # 只有手动选择了dev时才运行
-                      run_condition: ${{ github.event_name == 'workflow_dispatch' && inputs.environment == 'dev' }}
-
-        # 如果条件不满足，直接跳过该矩阵任务
-        if: matrix.run_condition == true
-
+        # 这里不再需要 if 判断，我们通过内部逻辑控制
         steps:
             - name: Install Wrangler
               run: npm install -g wrangler
 
+            # === 核心修复：动态环境变量配置 ===
+            # 根据触发类型和输入，决定使用哪个 Secret，并写入环境变量供后续步骤使用
+            - name: Setup Environment Variables
+              id: env_setup
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  
+                  # 1. 确定目标环境
+                  if [[ "${{ github.event_name }}" == "schedule" ]]; then
+                    TARGET_ENV="production"
+                  else
+                    TARGET_ENV="${{ inputs.environment }}"
+                  fi
+                  
+                  echo "🚀 Target Environment: $TARGET_ENV"
+                  
+                  # 2. 根据环境赋值 Secret
+                  if [[ "$TARGET_ENV" == "dev" ]]; then
+                    echo "DB_ID=${{ secrets.D1_DATABASE_ID_DEV }}" >> $GITHUB_ENV
+                    echo "WEBDAV_URL=${{ secrets.WEBDAV_URL_DEV }}" >> $GITHUB_ENV
+                  else
+                    echo "DB_ID=${{ secrets.D1_DATABASE_ID }}" >> $GITHUB_ENV
+                    echo "WEBDAV_URL=${{ secrets.WEBDAV_URL }}" >> $GITHUB_ENV
+                  fi
+                  
+                  # 3. 通用变量
+                  echo "CLOUDFLARE_API_TOKEN=${{ secrets.CLOUDFLARE_API_TOKEN }}" >> $GITHUB_ENV
+                  echo "CLOUDFLARE_ACCOUNT_ID=${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" >> $GITHUB_ENV
+                  echo "WEBDAV_USER=${{ secrets.WEBDAV_USER }}" >> $GITHUB_ENV
+                  echo "WEBDAV_PASS=${{ secrets.WEBDAV_PASS }}" >> $GITHUB_ENV
+                  echo "BACKUP_ENCRYPTION_KEY=${{ secrets.BACKUP_ENCRYPTION_KEY }}" >> $GITHUB_ENV
+
             - name: Get D1 Database Name
               id: db_name
-              env:
-                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-                  # 从矩阵中获取对应的 Secret 值
-                  TARGET_DB_ID: ${{ secrets[matrix.db_id_secret] }}
               run: |
-                  set -euo pipefail # 遇到错误立即退出
+                  set -euo pipefail
                   
-                  echo "Looking for DB ID: $TARGET_DB_ID"
-                  DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == env.TARGET_DB_ID) | .name')
+                  # 使用上面步骤设置的 $DB_ID
+                  echo "Looking for DB ID: $DB_ID"
+                  
+                  DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == env.DB_ID) | .name')
                   
                   if [ -z "$DB_NAME" ]; then
-                    echo "❌ Error: Could not find database with ID: $TARGET_DB_ID"
+                    echo "❌ Error: Could not find database with ID: $DB_ID"
                     exit 1
                   fi
                   
@@ -64,9 +76,6 @@ jobs:
                   echo "db_name=$DB_NAME" >> $GITHUB_OUTPUT
 
             - name: Export D1 Database
-              env:
-                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
               run: |
                   set -euo pipefail
                   
@@ -75,13 +84,10 @@ jobs:
                     --remote \
                     --output=backup.sql
                   
-                  # 压缩备份文件
                   gzip backup.sql
                   echo "📦 Backup compressed: backup.sql.gz"
 
             - name: Encrypt Backup (Optional)
-              env:
-                  BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
               run: |
                   set -euo pipefail
                   
@@ -92,7 +98,6 @@ jobs:
                       -out "warden-worker.sql.gz.enc" \
                       -pass pass:"$BACKUP_ENCRYPTION_KEY"
                     
-                    # 删除未加密文件
                     rm backup.sql.gz
                     echo "✅ Backup encrypted: warden-worker.sql.gz.enc"
                     echo "file_type=enc" >> $GITHUB_ENV
@@ -103,26 +108,47 @@ jobs:
                   fi
 
             - name: Upload to WebDAV
-              env:
-                  WEBDAV_URL: ${{ secrets[matrix.webdav_url_secret] }}
-                  WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-                  WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
               run: |
                   set -euo pipefail
                   
-                  # 根据上一步生成的环境变量决定上传哪个文件
+                  # 1. 确定要上传的本地文件名
                   if [ "$file_type" == "enc" ]; then
                     BACKUP_FILE="warden-worker.sql.gz.enc"
                   else
                     BACKUP_FILE="warden-worker.sql.gz"
                   fi
+
+                  # 2. 智能解析 URL 路径逻辑 (集成之前的优化)
+                  if [[ "$WEBDAV_URL" == */ ]]; then
+                    echo "📁 URL ends with '/': Treating as a directory path."
+                    
+                    DIR_URL="${WEBDAV_URL%/}"
+                    UPLOAD_URL="${DIR_URL}/${BACKUP_FILE}"
+                    
+                    echo "🔨 Checking/Creating directory: $DIR_URL"
+                    
+                    # 尝试创建目录 (MKCOL)
+                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X MKCOL \
+                      --user "$WEBDAV_USER:$WEBDAV_PASS" \
+                      "$DIR_URL")
+                    
+                    # 201=Created, 405=Method Not Allowed (exists), 409=Conflict (exists), 204/200=OK
+                    if [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 405 ] || [ "$HTTP_CODE" -eq 409 ] || [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 204 ]; then
+                      echo "   ✅ Directory verified/created."
+                    else
+                      echo "   ❌ Failed to create directory. HTTP Code: $HTTP_CODE"
+                      echo "   Hint: Ensure parent directories exist if using nested paths."
+                      exit 1
+                    fi
+                    
+                  else
+                    echo "📄 URL does NOT end with '/': Treating as a specific file path (overwrite mode)."
+                    UPLOAD_URL="$WEBDAV_URL"
+                  fi
+
+                  echo "☁️ Final Upload URL: $UPLOAD_URL"
                   
-                  # 规范化 URL (去除末尾斜杠)
-                  UPLOAD_URL="${WEBDAV_URL%/}/$BACKUP_FILE"
-                  
-                  echo "☁️ Uploading backup to: $UPLOAD_URL"
-                  
-                  # 使用 curl 上传，增加 --retry 和 --connect-timeout 提高稳定性
+                  # 3. 执行上传
                   curl -X PUT \
                     --user "$WEBDAV_USER:$WEBDAV_PASS" \
                     --upload-file "$BACKUP_FILE" \
