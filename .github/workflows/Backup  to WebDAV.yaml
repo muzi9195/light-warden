@@ -1,0 +1,136 @@
+name: Backup D1 Database to WebDAV
+
+on:
+    schedule:
+        # Run daily at UTC 04:00
+        - cron: "0 4 * * *"
+    workflow_dispatch:
+        inputs:
+            environment:
+                description: "Select the environment to backup"
+                required: true
+                default: "production"
+                type: choice
+                options:
+                    - production
+                    - dev
+
+jobs:
+    backup:
+        name: Backup ${{ matrix.env_name }} D1 Database
+        runs-on: ubuntu-latest
+        # 核心逻辑：使用矩阵策略区分环境，避免重复代码
+        strategy:
+            matrix:
+                include:
+                    - env_name: production
+                      db_id_secret: D1_DATABASE_ID
+                      webdav_url_secret: WEBDAV_URL
+                      # 只有定时任务且是production，或者手动选择了production时才运行
+                      run_condition: ${{ (github.event_name == 'schedule') || (github.event_name == 'workflow_dispatch' && inputs.environment == 'production') }}
+                    
+                    - env_name: dev
+                      db_id_secret: D1_DATABASE_ID_DEV
+                      webdav_url_secret: WEBDAV_URL_DEV
+                      # 只有手动选择了dev时才运行
+                      run_condition: ${{ github.event_name == 'workflow_dispatch' && inputs.environment == 'dev' }}
+
+        # 如果条件不满足，直接跳过该矩阵任务
+        if: matrix.run_condition == true
+
+        steps:
+            - name: Install Wrangler
+              run: npm install -g wrangler
+
+            - name: Get D1 Database Name
+              id: db_name
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+                  # 从矩阵中获取对应的 Secret 值
+                  TARGET_DB_ID: ${{ secrets[matrix.db_id_secret] }}
+              run: |
+                  set -euo pipefail # 遇到错误立即退出
+                  
+                  echo "Looking for DB ID: $TARGET_DB_ID"
+                  DB_NAME=$(npx wrangler d1 list --json | jq -r '.[] | select(.uuid == env.TARGET_DB_ID) | .name')
+                  
+                  if [ -z "$DB_NAME" ]; then
+                    echo "❌ Error: Could not find database with ID: $TARGET_DB_ID"
+                    exit 1
+                  fi
+                  
+                  echo "✅ Found database: $DB_NAME"
+                  echo "db_name=$DB_NAME" >> $GITHUB_OUTPUT
+
+            - name: Export D1 Database
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+              run: |
+                  set -euo pipefail
+                  
+                  echo "🚀 Exporting D1 database (${{ steps.db_name.outputs.db_name }})..."
+                  npx wrangler d1 export "${{ steps.db_name.outputs.db_name }}" \
+                    --remote \
+                    --output=backup.sql
+                  
+                  # 压缩备份文件
+                  gzip backup.sql
+                  echo "📦 Backup compressed: backup.sql.gz"
+
+            - name: Encrypt Backup (Optional)
+              env:
+                  BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+              run: |
+                  set -euo pipefail
+                  
+                  if [ -n "$BACKUP_ENCRYPTION_KEY" ]; then
+                    echo "🔒 Encrypting backup with AES-256..."
+                    openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+                      -in backup.sql.gz \
+                      -out "warden-worker.sql.gz.enc" \
+                      -pass pass:"$BACKUP_ENCRYPTION_KEY"
+                    
+                    # 删除未加密文件
+                    rm backup.sql.gz
+                    echo "✅ Backup encrypted: warden-worker.sql.gz.enc"
+                    echo "file_type=enc" >> $GITHUB_ENV
+                  else
+                    echo "⚠️ BACKUP_ENCRYPTION_KEY not set, skipping encryption"
+                    mv backup.sql.gz "warden-worker.sql.gz"
+                    echo "file_type=plain" >> $GITHUB_ENV
+                  fi
+
+            - name: Upload to WebDAV
+              env:
+                  WEBDAV_URL: ${{ secrets[matrix.webdav_url_secret] }}
+                  WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+                  WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+              run: |
+                  set -euo pipefail
+                  
+                  # 根据上一步生成的环境变量决定上传哪个文件
+                  if [ "$file_type" == "enc" ]; then
+                    BACKUP_FILE="warden-worker.sql.gz.enc"
+                  else
+                    BACKUP_FILE="warden-worker.sql.gz"
+                  fi
+                  
+                  # 规范化 URL (去除末尾斜杠)
+                  UPLOAD_URL="${WEBDAV_URL%/}/$BACKUP_FILE"
+                  
+                  echo "☁️ Uploading backup to: $UPLOAD_URL"
+                  
+                  # 使用 curl 上传，增加 --retry 和 --connect-timeout 提高稳定性
+                  curl -X PUT \
+                    --user "$WEBDAV_USER:$WEBDAV_PASS" \
+                    --upload-file "$BACKUP_FILE" \
+                    --fail \
+                    --show-error \
+                    --retry 3 \
+                    --retry-delay 5 \
+                    --connect-timeout 10 \
+                    "$UPLOAD_URL"
+                  
+                  echo "✅ Backup uploaded successfully"
