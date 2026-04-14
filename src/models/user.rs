@@ -124,9 +124,7 @@ mod bool_from_int {
 pub struct PreloginResponse {
     pub kdf: i32,
     pub kdf_iterations: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub kdf_memory: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub kdf_parallelism: Option<i32>,
 }
 
@@ -144,6 +142,13 @@ pub struct RegisterRequest {
     pub kdf_iterations: i32,
     pub kdf_memory: Option<i32>, // Argon2 memory parameter (15-1024 MB)
     pub kdf_parallelism: Option<i32>, // Argon2 parallelism parameter (1-16)
+}
+
+// For POST /accounts/password-hint request
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordHintRequest {
+    pub email: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,6 +342,7 @@ pub struct RotateFolderData {
     // There is a bug in 2024.3.x which adds a `null` item.
     // To bypass this we allow an Option here, but skip it during the updates
     // See: https://github.com/bitwarden/clients/issues/8453
+    #[serde(default, deserialize_with = "super::deser_opt_nonempty_str")]
     pub id: Option<String>,
     pub name: String,
 }
